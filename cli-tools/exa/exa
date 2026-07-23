@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+"""Exa AI CLI — search the web and extract contents from the command line.
+
+Authenticate: set EXA_API_KEY in ~/.env or environment.
+"""
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+API_BASE = "https://api.exa.ai"
+
+SEARCH_TYPES = ("auto", "fast", "instant", "deep-lite", "deep", "deep-reasoning")
+CATEGORIES = ("company", "people", "research paper", "news", "personal site", "financial report")
+
+
+def require_key() -> str:
+    key = os.environ.get("EXA_API_KEY", "")
+    if key:
+        return key
+    env_file = os.path.expanduser("~/.env")
+    if os.path.isfile(env_file):
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("EXA_API_KEY="):
+                    key = line.split("=", 1)[1].strip().strip("'\"")
+                    if key:
+                        return key
+    print("EXA_API_KEY is required. Set it in ~/.env or as an environment variable.", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def api_request(method: str, path: str, payload=None):
+    url = f"{API_BASE}{path}"
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "exa-cli/1.0.0",
+        "x-api-key": require_key(),
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        print(f"HTTP {exc.code}: {body}", file=sys.stderr)
+        raise SystemExit(2)
+    except urllib.error.URLError as exc:
+        print(f"Network error: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def fmt_cost(resp: dict) -> str:
+    cost = resp.get("costDollars", {})
+    total = cost.get("total")
+    if total is not None:
+        return f"${total:.4f}"
+    return ""
+
+
+def print_json(obj):
+    print(json.dumps(obj, ensure_ascii=False, indent=2))
+
+
+def print_results(resp: dict, *, show_text: bool = False, show_highlights: bool = False,
+                  show_summary: bool = False, as_json: bool = False):
+    if as_json:
+        print_json(resp)
+        return
+
+    results = resp.get("results", [])
+    search_type = resp.get("searchType", "")
+    cost = fmt_cost(resp)
+
+    header_parts = [f"{len(results)} results"]
+    if search_type:
+        header_parts.append(f"type={search_type}")
+    if cost:
+        header_parts.append(cost)
+    print(f"--- {' | '.join(header_parts)} ---\n", file=sys.stderr)
+
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "(no title)")
+        url = r.get("url", "")
+        date = r.get("publishedDate", "")
+        author = r.get("author", "")
+
+        print(f"[{i}] {title}")
+        print(f"    {url}")
+        if date:
+            print(f"    Published: {date[:10]}")
+        if author:
+            print(f"    Author: {author}")
+
+        if show_highlights and r.get("highlights"):
+            for h in r["highlights"]:
+                print(f"    > {h[:300]}")
+
+        if show_summary and r.get("summary"):
+            print(f"    Summary: {r['summary'][:500]}")
+
+        if show_text and r.get("text"):
+            text = r["text"][:2000]
+            for line in text.split("\n")[:20]:
+                print(f"    {line}")
+
+        print()
+
+    output = resp.get("output")
+    if output:
+        content = output.get("content", "")
+        print("=== Synthesized Output ===")
+        if isinstance(content, str):
+            print(content)
+        else:
+            print_json(content)
+        grounding = output.get("grounding", [])
+        if grounding:
+            print("\n--- Grounding ---")
+            for g in grounding:
+                field = g.get("field", "")
+                confidence = g.get("confidence", "")
+                cites = g.get("citations", [])
+                cite_str = ", ".join(c.get("title", c.get("url", "")) for c in cites)
+                print(f"  [{confidence}] {field}: {cite_str}")
+        print()
+
+
+# ── search ──────────────────────────────────────────────────────
+
+def cmd_search(args):
+    payload = {"query": args.query}
+
+    if args.type:
+        payload["type"] = args.type
+    if args.num:
+        payload["numResults"] = args.num
+    if args.category:
+        payload["category"] = args.category
+    if args.include_domains:
+        payload["includeDomains"] = args.include_domains
+    if args.exclude_domains:
+        payload["excludeDomains"] = args.exclude_domains
+    if args.start_date:
+        payload["startPublishedDate"] = args.start_date
+    if args.end_date:
+        payload["endPublishedDate"] = args.end_date
+    if args.location:
+        payload["userLocation"] = args.location
+    if args.moderation:
+        payload["moderation"] = True
+    if args.system_prompt:
+        payload["systemPrompt"] = args.system_prompt
+
+    contents = {}
+    show_text = False
+    show_highlights = False
+    show_summary = False
+
+    if args.highlights:
+        contents["highlights"] = True
+        show_highlights = True
+    if args.text:
+        text_opts = True
+        if args.max_chars:
+            text_opts = {"maxCharacters": args.max_chars}
+        contents["text"] = text_opts
+        show_text = True
+    if args.summary:
+        contents["summary"] = True
+        show_summary = True
+
+    if not contents:
+        contents["highlights"] = True
+        show_highlights = True
+
+    payload["contents"] = contents
+
+    if args.output_schema:
+        try:
+            payload["outputSchema"] = json.loads(args.output_schema)
+        except json.JSONDecodeError as e:
+            print(f"Invalid --output-schema JSON: {e}", file=sys.stderr)
+            raise SystemExit(1)
+
+    resp = api_request("POST", "/search", payload)
+
+    if args.output:
+        with open(args.output, "w") as f:
+            json.dump(resp, f, ensure_ascii=False, indent=2)
+        print(f"Saved to {args.output}", file=sys.stderr)
+
+    print_results(resp, show_text=show_text, show_highlights=show_highlights,
+                  show_summary=show_summary, as_json=args.json)
+
+
+# ── contents ────────────────────────────────────────────────────
+
+def cmd_contents(args):
+    payload = {"urls": args.urls}
+
+    if args.highlights:
+        payload["highlights"] = True
+    if args.text:
+        text_opts = True
+        if args.max_chars:
+            text_opts = {"maxCharacters": args.max_chars}
+        payload["text"] = text_opts
+    if args.summary:
+        payload["summary"] = True
+    if args.subpages:
+        payload["subpages"] = args.subpages
+    if args.subpage_target:
+        payload["subpageTarget"] = args.subpage_target
+    if args.max_age_hours is not None:
+        payload["maxAgeHours"] = args.max_age_hours
+
+    if not any(k in payload for k in ("highlights", "text", "summary")):
+        payload["highlights"] = True
+
+    resp = api_request("POST", "/contents", payload)
+
+    show_text = "text" in payload
+    show_highlights = "highlights" in payload
+    show_summary = "summary" in payload
+
+    if args.output:
+        with open(args.output, "w") as f:
+            json.dump(resp, f, ensure_ascii=False, indent=2)
+        print(f"Saved to {args.output}", file=sys.stderr)
+
+    print_results(resp, show_text=show_text, show_highlights=show_highlights,
+                  show_summary=show_summary, as_json=args.json)
+
+
+# ── find-similar ────────────────────────────────────────────────
+
+def cmd_similar(args):
+    payload = {"url": args.url}
+    if args.num:
+        payload["numResults"] = args.num
+    if args.include_domains:
+        payload["includeDomains"] = args.include_domains
+    if args.exclude_domains:
+        payload["excludeDomains"] = args.exclude_domains
+    if args.start_date:
+        payload["startPublishedDate"] = args.start_date
+    if args.end_date:
+        payload["endPublishedDate"] = args.end_date
+
+    contents = {}
+    if args.highlights:
+        contents["highlights"] = True
+    if args.text:
+        contents["text"] = True
+    if not contents:
+        contents["highlights"] = True
+
+    payload["contents"] = contents
+
+    resp = api_request("POST", "/findSimilar", payload)
+
+    if args.output:
+        with open(args.output, "w") as f:
+            json.dump(resp, f, ensure_ascii=False, indent=2)
+        print(f"Saved to {args.output}", file=sys.stderr)
+
+    print_results(resp, show_text="text" in contents,
+                  show_highlights="highlights" in contents, as_json=args.json)
+
+
+# ── main ────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="exa",
+        description="Exa AI CLI — search the web and extract contents.",
+    )
+    parser.add_argument("--version", action="version", version="exa-cli 1.0.0")
+    parser.add_argument("--json", action="store_true", help="Output raw JSON")
+    sub = parser.add_subparsers(dest="command")
+
+    # search
+    sp = sub.add_parser("search", aliases=["s"], help="Search the web")
+    sp.add_argument("query", help="Search query")
+    sp.add_argument("-t", "--type", choices=SEARCH_TYPES, default=None, help="Search type (default: auto)")
+    sp.add_argument("-n", "--num", type=int, default=None, help="Number of results (default: 10, max: 100)")
+    sp.add_argument("-c", "--category", choices=CATEGORIES, default=None, help="Category filter")
+    sp.add_argument("--include-domains", nargs="+", metavar="DOMAIN", help="Only these domains")
+    sp.add_argument("--exclude-domains", nargs="+", metavar="DOMAIN", help="Exclude these domains")
+    sp.add_argument("--start-date", metavar="DATE", help="Published after (ISO 8601)")
+    sp.add_argument("--end-date", metavar="DATE", help="Published before (ISO 8601)")
+    sp.add_argument("--location", metavar="CC", help="Two-letter country code")
+    sp.add_argument("--moderation", action="store_true", help="Enable content moderation")
+    sp.add_argument("--highlights", action="store_true", help="Return highlights (default if nothing specified)")
+    sp.add_argument("--text", action="store_true", help="Return full text")
+    sp.add_argument("--summary", action="store_true", help="Return LLM summary")
+    sp.add_argument("--max-chars", type=int, help="Max characters for text mode")
+    sp.add_argument("--system-prompt", metavar="PROMPT", help="System prompt for synthesized output")
+    sp.add_argument("--output-schema", metavar="JSON", help="JSON schema for structured output")
+    sp.add_argument("-o", "--output", metavar="FILE", help="Save full JSON response to file")
+    sp.set_defaults(func=cmd_search)
+
+    # contents
+    cp = sub.add_parser("contents", aliases=["c", "extract"], help="Extract content from URLs")
+    cp.add_argument("urls", nargs="+", help="One or more URLs")
+    cp.add_argument("--highlights", action="store_true", help="Return highlights (default)")
+    cp.add_argument("--text", action="store_true", help="Return full text")
+    cp.add_argument("--summary", action="store_true", help="Return LLM summary")
+    cp.add_argument("--max-chars", type=int, help="Max characters for text mode")
+    cp.add_argument("--subpages", type=int, metavar="N", help="Number of subpages to crawl per URL")
+    cp.add_argument("--subpage-target", nargs="+", metavar="KW", help="Keywords to prioritize subpages")
+    cp.add_argument("--max-age-hours", type=int, metavar="H", help="Max cache age (0=always livecrawl, -1=cache only)")
+    cp.add_argument("-o", "--output", metavar="FILE", help="Save full JSON response to file")
+    cp.set_defaults(func=cmd_contents)
+
+    # find-similar
+    fp = sub.add_parser("similar", aliases=["sim"], help="Find pages similar to a URL")
+    fp.add_argument("url", help="Reference URL")
+    fp.add_argument("-n", "--num", type=int, default=None, help="Number of results")
+    fp.add_argument("--include-domains", nargs="+", metavar="DOMAIN", help="Only these domains")
+    fp.add_argument("--exclude-domains", nargs="+", metavar="DOMAIN", help="Exclude these domains")
+    fp.add_argument("--start-date", metavar="DATE", help="Published after (ISO 8601)")
+    fp.add_argument("--end-date", metavar="DATE", help="Published before (ISO 8601)")
+    fp.add_argument("--highlights", action="store_true", help="Return highlights (default)")
+    fp.add_argument("--text", action="store_true", help="Return full text")
+    fp.add_argument("-o", "--output", metavar="FILE", help="Save full JSON response to file")
+    fp.set_defaults(func=cmd_similar)
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        raise SystemExit(0)
+
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""Parse documents with the PaddleOCR-VL async jobs API."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import requests
+
+
+DEFAULT_JOB_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+DEFAULT_MODEL = "PaddleOCR-VL-1.6"
+REQUEST_TIMEOUT = 120
+SECRET_ENV_RE = re.compile(r"(TOKEN|KEY|SECRET|PASSWORD|AUTH)", re.I)
+
+
+class PaddleOCRError(RuntimeError):
+    pass
+
+
+def parse_env_value(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    if (value[0], value[-1:]) in {('"', '"'), ("'", "'")}:
+        value = value[1:-1]
+    return value
+
+
+def iter_project_env_files(cwd: Path) -> list[Path]:
+    chain = [cwd, *cwd.parents]
+    return [p / ".env" for p in reversed(chain)]
+
+
+def load_env_files() -> None:
+    locked = set(os.environ)
+    candidates: list[Path] = [
+        Path.home() / ".env",
+        Path.home() / ".codex" / ".env",
+        *iter_project_env_files(Path.cwd().resolve()),
+    ]
+    explicit = os.environ.get("PDF_OCR_ENV_FILE")
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            for raw in path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[7:].strip()
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                if not key or key in locked:
+                    continue
+                os.environ[key] = parse_env_value(value)
+        except OSError as exc:
+            raise PaddleOCRError(f"Could not read env file {path}: {exc}") from exc
+
+
+def redact(text: str) -> str:
+    for key, value in os.environ.items():
+        if value and len(value) >= 8 and SECRET_ENV_RE.search(key):
+            text = text.replace(value, "[redacted]")
+    return text
+
+
+def is_url(value: str) -> bool:
+    return value.startswith(("http://", "https://"))
+
+
+def env_value(*keys: str) -> str:
+    for key in keys:
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def normalize_job_url(value: str, *, explicit: bool = False) -> str:
+    url = (value or DEFAULT_JOB_URL).strip().rstrip("/")
+    if not url:
+        return DEFAULT_JOB_URL
+    if url.endswith("/layout-parsing") and not explicit:
+        return DEFAULT_JOB_URL
+    return url
+
+
+def job_url_from_env(args: argparse.Namespace) -> str:
+    if args.endpoint:
+        return normalize_job_url(args.endpoint, explicit=True)
+    return normalize_job_url(
+        env_value(
+            "PADDLEOCR_JOB_URL",
+            "PADDLEOCR_AISTUDIO_API_URL",
+            "PADDLEOCR_API_URL",
+            "BAIDU_PADDLEOCR_JOB_URL",
+        )
+    )
+
+
+def model_from_env(args: argparse.Namespace) -> str:
+    return args.model or env_value("PADDLEOCR_MODEL", "PADDLEOCR_AISTUDIO_MODEL") or DEFAULT_MODEL
+
+
+def access_token() -> str:
+    token = env_value(
+        "PADDLEOCR_AISTUDIO_TOKEN",
+        "PADDLEOCR_TOKEN",
+        "PADDLEOCR_ACCESS_TOKEN",
+        "PADDLEOCR_MCP_AISTUDIO_ACCESS_TOKEN",
+        "AISTUDIO_ACCESS_TOKEN",
+        "BAIDU_PADDLEOCR_TOKEN",
+    )
+    if not token:
+        raise PaddleOCRError("PADDLEOCR_AISTUDIO_TOKEN is not set in the environment or .env files.")
+    return token
+
+
+def auth_headers(args: argparse.Namespace) -> dict[str, str]:
+    scheme = args.auth_scheme or env_value("PADDLEOCR_AUTH_SCHEME") or "bearer"
+    if scheme.lower() == "token" and not args.auth_scheme:
+        scheme = "bearer"
+    return {"Authorization": f"{scheme} {access_token()}"}
+
+
+def read_extra_json(path_value: str | None) -> dict[str, Any]:
+    if not path_value:
+        return {}
+    path = Path(path_value).expanduser()
+    try:
+        extra = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 - keep CLI errors concise.
+        raise PaddleOCRError(f"Could not read --extra-json {path}: {exc}") from exc
+    if not isinstance(extra, dict):
+        raise PaddleOCRError("--extra-json must contain a JSON object.")
+    return extra
+
+
+def optional_payload(args: argparse.Namespace) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "useDocOrientationClassify": bool(args.orientation),
+        "useDocUnwarping": bool(args.unwarp),
+        "useChartRecognition": bool(args.chart_recognition),
+    }
+    extra = read_extra_json(args.extra_json)
+    nested = extra.pop("optionalPayload", None)
+    if isinstance(nested, dict):
+        payload.update(nested)
+    payload.update(extra)
+    return payload
+
+
+def check_response(response: requests.Response, phase: str) -> dict[str, Any]:
+    if response.status_code != 200:
+        raise PaddleOCRError(redact(f"HTTP {response.status_code} during {phase}: {response.text[:1200]}"))
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise PaddleOCRError(redact(f"Expected JSON during {phase}, got: {response.text[:1200]}")) from exc
+    code = body.get("code")
+    if code not in (0, None):
+        message = body.get("msg") or body.get("message") or body.get("errorMsg") or code
+        raise PaddleOCRError(redact(f"PaddleOCR API error during {phase}: {message}"))
+    return body
+
+
+def submit_job(session: requests.Session, args: argparse.Namespace, job_url: str, model: str) -> str:
+    options = optional_payload(args)
+    headers = auth_headers(args)
+    if is_url(args.input):
+        payload = {"fileUrl": args.input, "model": model, "optionalPayload": options}
+        response = session.post(job_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+    else:
+        path = Path(args.input).expanduser().resolve()
+        if not path.is_file():
+            raise PaddleOCRError(f"Input file not found: {path}")
+        data = {"model": model, "optionalPayload": json.dumps(options, ensure_ascii=False)}
+        with path.open("rb") as handle:
+            response = session.post(job_url, headers=headers, data=data, files={"file": handle}, timeout=REQUEST_TIMEOUT)
+    body = check_response(response, "submit")
+    job_id = ((body.get("data") or {}).get("jobId")) if isinstance(body.get("data"), dict) else None
+    if not job_id:
+        raise PaddleOCRError(redact(f"PaddleOCR response missing jobId: {json.dumps(body)[:1200]}"))
+    return str(job_id)
+
+
+def poll_job(session: requests.Session, args: argparse.Namespace, job_url: str, job_id: str) -> dict[str, Any]:
+    deadline = time.time() + args.timeout
+    headers = auth_headers(args)
+    while time.time() < deadline:
+        response = session.get(f"{job_url}/{job_id}", headers=headers, timeout=REQUEST_TIMEOUT)
+        body = check_response(response, "poll")
+        data = body.get("data") if isinstance(body.get("data"), dict) else {}
+        state = data.get("state")
+        if state == "done":
+            return data
+        if state == "failed":
+            raise PaddleOCRError(redact(f"Job failed: {data.get('errorMsg', 'unknown error')}"))
+        if not args.quiet:
+            progress = data.get("extractProgress") if isinstance(data.get("extractProgress"), dict) else {}
+            total = progress.get("totalPages", "?")
+            extracted = progress.get("extractedPages", "?")
+            print(f"PaddleOCR-VL job {job_id}: {state or 'unknown'} ({extracted}/{total} pages)", file=sys.stderr)
+        time.sleep(args.poll_interval)
+    raise PaddleOCRError(f"Timeout waiting for job {job_id}")
+
+
+def download_jsonl(session: requests.Session, result_data: dict[str, Any]) -> str:
+    result_url = result_data.get("resultUrl") if isinstance(result_data.get("resultUrl"), dict) else {}
+    json_url = result_url.get("jsonUrl")
+    if not json_url:
+        raise PaddleOCRError(redact(f"PaddleOCR result missing jsonUrl: {json.dumps(result_data)[:1200]}"))
+    response = session.get(json_url, timeout=REQUEST_TIMEOUT)
+    if response.status_code != 200:
+        raise PaddleOCRError(f"Failed downloading result JSONL: HTTP {response.status_code}")
+    return response.text
+
+
+def download_asset(session: requests.Session, url: str, dest: Path) -> None:
+    response = session.get(url, timeout=REQUEST_TIMEOUT)
+    if response.status_code != 200:
+        raise PaddleOCRError(f"Failed downloading image asset: HTTP {response.status_code}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(response.content)
+
+
+def safe_asset_path(value: str, fallback: str) -> Path:
+    cleaned = value.replace("\\", "/").strip().lstrip("/")
+    parts = [p for p in cleaned.split("/") if p and p not in {".", ".."}]
+    if not parts:
+        parts = [fallback]
+    return Path(*parts)
+
+
+def iter_layout_results(jsonl_text: str) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for line_num, raw in enumerate(jsonl_text.splitlines(), start=1):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise PaddleOCRError(f"Invalid JSONL result at line {line_num}: {exc}") from exc
+        result = parsed.get("result", parsed)
+        pages = result.get("layoutParsingResults") if isinstance(result, dict) else None
+        if isinstance(pages, list):
+            results.extend(page for page in pages if isinstance(page, dict))
+    return results
+
+
+def extract_markdown(jsonl_text: str, assets_dir: str | None) -> str:
+    session = requests.Session()
+    pages = iter_layout_results(jsonl_text)
+    texts: list[str] = []
+    asset_root = Path(assets_dir).expanduser() if assets_dir else None
+    for page_num, page in enumerate(pages):
+        markdown = page.get("markdown") if isinstance(page.get("markdown"), dict) else {}
+        text = markdown.get("text") if isinstance(markdown, dict) else ""
+        if not isinstance(text, str):
+            text = ""
+        images = markdown.get("images") if isinstance(markdown, dict) else {}
+        if isinstance(images, dict):
+            for index, (image_path, image_url) in enumerate(images.items(), start=1):
+                if not isinstance(image_url, str) or not image_url.startswith(("http://", "https://")):
+                    continue
+                if asset_root:
+                    rel_path = safe_asset_path(str(image_path), f"page-{page_num + 1}-image-{index}.png")
+                    download_asset(session, image_url, asset_root / rel_path)
+                    text = text.replace(str(image_path), str(rel_path))
+                else:
+                    text = text.replace(str(image_path), image_url)
+        if text.strip():
+            texts.append(text.rstrip())
+    if not texts:
+        raise PaddleOCRError("PaddleOCR response did not include Markdown text.")
+    return "\n\n".join(texts) + "\n"
+
+
+def write_output(text: str, output: str | None) -> None:
+    if not output or output == "-":
+        sys.stdout.write(text)
+        if text and not text.endswith("\n"):
+            sys.stdout.write("\n")
+        return
+    out_path = Path(output).expanduser()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(text, encoding="utf-8")
+
+
+def save_meta(job_id: str, result_data: dict[str, Any], output: str | None, meta_output: str | None) -> None:
+    if not meta_output and not output:
+        return
+    if not meta_output and output != "-":
+        meta_output = f"{output}.meta.json"
+    if not meta_output:
+        return
+    path = Path(meta_output).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"jobId": job_id, "result": result_data}
+    redacted = json.loads(redact(json.dumps(payload, ensure_ascii=False)))
+    path.write_text(json.dumps(redacted, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Parse PDF/images with PaddleOCR-VL-1.6 jobs API.")
+    parser.add_argument("input", help="Local file path or HTTP(S) URL.")
+    parser.add_argument("-o", "--output", help="Output Markdown path. Defaults to stdout.")
+    parser.add_argument("--assets-dir", help="Download Markdown image assets into this directory.")
+    parser.add_argument("--endpoint", help=f"Override PaddleOCR jobs endpoint. Default: {DEFAULT_JOB_URL}")
+    parser.add_argument("--model", help=f"Model name. Default: {DEFAULT_MODEL}")
+    parser.add_argument("--auth-scheme", help="Authorization scheme. Default: bearer.")
+    parser.add_argument("--orientation", action="store_true", help="Enable document orientation classification.")
+    parser.add_argument("--unwarp", action="store_true", help="Enable document unwarping.")
+    parser.add_argument("--chart-recognition", action="store_true", help="Enable chart recognition.")
+    parser.add_argument("--extra-json", help="JSON object merged into optionalPayload.")
+    parser.add_argument("--meta-output", help="Write redacted job metadata JSON to this path.")
+    parser.add_argument("--timeout", type=int, default=600, help="Max seconds to wait for the async job.")
+    parser.add_argument("--poll-interval", type=int, default=5)
+    parser.add_argument("-q", "--quiet", action="store_true")
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        load_env_files()
+        job_url = job_url_from_env(args)
+        model = model_from_env(args)
+        if not args.quiet:
+            print(f"PaddleOCR-VL endpoint: {job_url}", file=sys.stderr)
+            print(f"PaddleOCR-VL model: {model}", file=sys.stderr)
+        session = requests.Session()
+        job_id = submit_job(session, args, job_url, model)
+        if not args.quiet:
+            print(f"PaddleOCR-VL job submitted: {job_id}", file=sys.stderr)
+        result_data = poll_job(session, args, job_url, job_id)
+        jsonl_text = download_jsonl(session, result_data)
+        markdown = extract_markdown(jsonl_text, args.assets_dir)
+        write_output(markdown, args.output)
+        save_meta(job_id, result_data, args.output, args.meta_output)
+        return 0
+    except KeyboardInterrupt:
+        print("Interrupted.", file=sys.stderr)
+        return 130
+    except PaddleOCRError as exc:
+        print(f"paddleocr-vl-parse: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

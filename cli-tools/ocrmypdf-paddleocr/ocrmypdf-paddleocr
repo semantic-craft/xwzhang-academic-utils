@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TOOL_HOME="$HOME/.local/share/ocrmypdf-paddleocr"
+exec "$TOOL_HOME/bin/ocrmypdf" --plugin ocrmypdf_paddleocr "$@"

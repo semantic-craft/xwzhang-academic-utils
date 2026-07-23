@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+
+# Build / outputs / logs
+build/
+dist/
+*.log
+.tmp/
+
+# Local env / secrets
+.env
+.env.*

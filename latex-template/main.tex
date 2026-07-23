@@ -1,0 +1,60 @@
+\documentclass[UTF8,a4paper,zihao=5]{ctexart}
+
+\usepackage{lawreview-zh}
+
+\lawpapertitle{制度转型中的法学方法论一致性}
+\lawpaperenglishtitle{Methodological Coherence in Legal Institutional Transformation}
+\lawpaperauthor{张三}
+\lawpaperinstitution{某某大学 法学院（北京，100000）}
+\lawpaperrank{副教授}
+\lawpaperdegree{法学博士}
+\lawpaperaddress{北京市海淀区某某路 1 号}
+\lawpaperphone{13800000000}
+\lawpaperemail{author@example.com}
+\lawpaperfund{国家社会科学基金项目“数字法治的制度基础研究”（项目编号：XX000000）}
+
+\begin{document}
+
+\makeauthorinfopage
+\makepapertitle
+
+\zhabstract{在此输入中文摘要，建议控制在二百至三百字。摘要应直接概括文章的研究对象、核心问题、主要判断和规范贡献，避免写成“本文第一部分、第二部分”的结构介绍，也尽量避免使用“笔者认为”等主观表达。对于中文法学期刊而言，摘要最好能够独立呈现文章的中心论断，使读者无需阅读全文即可把握文章处理的问题、采用的路径以及可能形成的制度启示。}
+
+\zhkeywords{关键词一；关键词二；关键词三；关键词四}
+
+\enabstract{Enter the English abstract here. It should restate the central research question, the main argument, and the contribution of the article in concise academic English.}
+
+\enkeywords{keyword one; keyword two; keyword three}
+
+\section{第一部分标题}
+
+正文内容在此输入。本模板按附件中的“现代法学投稿模板”抽取主要版式：正文为宋体五号，固定行距约十五点七五磅，段首缩进两个中文字符，页面为 A4，左右页边距约二十八毫米，上下页边距约二十五毫米。脚注采用全文连续编号，编号形式为中文法学论文常见的方括式。\footnote{此为脚注格式示例。正式写作时可按《法学引注手册》2019 的规则整理作者、文献名、出版信息与页码。}
+
+如果从 Word 或 Markdown 粘贴正文，建议先保持纯文本，再在 LaTeX 中用 \verb|\section|、\verb|\subsection|、\verb|\subsubsection| 标明层级。这样标题编号、行距和脚注会统一由模板控制。
+
+\subsection{第一部分第一节}
+
+二级标题使用“（一）”样式。中文法学论文通常需要让标题本身承担论证功能，标题不宜只是材料标签，而应提示本节的规范问题或制度判断。
+
+\subsubsection{第一部分第一节第一项}
+
+三级标题使用阿拉伯数字加点。正文继续保持首行缩进和五号宋体。需要列举规范文本、案例或学说观点时，可以在段落内部完成，也可以使用表格，但投稿稿件中应谨慎使用过多复杂表格。
+
+\lawtablecaption{表 1　示例表格}
+\begin{tabularx}{\textwidth}{|Y|Y|Y|}
+  \hline
+  类型 & 功能 & 写作提示 \\
+  \hline
+  规范材料 & 支撑制度描述 & 说明文本来源、效力层级与适用范围 \\
+  \hline
+  学说观点 & 支撑理论分歧 & 避免堆砌，重点说明争点如何服务论证 \\
+  \hline
+  裁判材料 & 支撑实践问题 & 交代裁判规则、事实背景与可推广边界 \\
+  \hline
+\end{tabularx}
+
+\section{第二部分标题}
+
+正文内容继续。写作时可以把这份 \verb|main.tex| 当作论文入口文件，把每一节拆到 \verb|sections/| 子文件也可以；目前先保持单文件，便于确认 VS Code 与 LaTeX Workshop 的编译链路是否稳定。
+
+\end{document}

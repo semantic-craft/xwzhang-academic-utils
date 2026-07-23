@@ -1,0 +1,399 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ------------------------------------------------------------
+# Env loading (P1 fix)
+#
+# - Environment variable has priority over ~/.env (Unix convention).
+# - Only TODOIST_API_TOKEN is extracted — we do NOT bulk-source
+#   ~/.env, so other secrets in that file are not pulled into this
+#   process's environment.
+# - Pure bash parsing, no fork / no subshell.
+# ------------------------------------------------------------
+load_env() {
+  [[ "${TODOIST_API_TOKEN+x}" == "x" ]] && return 0
+
+  local env_file="${HOME}/.env"
+  [[ -f "${env_file}" ]] || return 0
+
+  local line val
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "${line}" || "${line}" == \#* ]] && continue
+
+    if [[ "${line}" =~ ^(export[[:space:]]+)?TODOIST_API_TOKEN=(.*)$ ]]; then
+      val="${BASH_REMATCH[2]}"
+      if [[ "${val}" =~ ^\"(.*)\"$ ]]; then
+        val="${BASH_REMATCH[1]}"
+      elif [[ "${val}" =~ ^\'(.*)\'$ ]]; then
+        val="${BASH_REMATCH[1]}"
+      fi
+      TODOIST_API_TOKEN="${val}"
+      break
+    fi
+  done < "${env_file}"
+}
+
+# ------------------------------------------------------------
+# UUID v4 for X-Request-Id idempotency.
+# Prefer uuidgen (native, ~1ms) over python fork (~40ms).
+# ------------------------------------------------------------
+request_id() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr '[:upper:]' '[:lower:]'
+  else
+    python3 -c 'import uuid; print(uuid.uuid4())'
+  fi
+}
+
+urlencode() {
+  python3 - "$1" <<'PY'
+import sys
+import urllib.parse
+
+print(urllib.parse.quote(sys.argv[1]))
+PY
+}
+
+tasks_endpoint() {
+  local filter="$1" cursor="${2:-}"
+  local endpoint="/tasks?filter=$(urlencode "${filter}")"
+  if [[ -n "${cursor}" ]]; then
+    endpoint="${endpoint}&cursor=$(urlencode "${cursor}")"
+  fi
+  printf '%s' "${endpoint}"
+}
+
+extract_next_cursor() {
+  python3 -c 'import json,sys
+page=json.load(sys.stdin)
+print(page.get("next_cursor") or "")'
+}
+
+# ------------------------------------------------------------
+# Low-level API wrapper (P0 fix)
+#
+# The Authorization header is NOT passed via --header (argv) because
+# `ps auxww` can see argv on shared systems. Instead, we write a
+# curl config file via bash process substitution <(...); curl's argv
+# shows only `-K /dev/fd/N`, which contains no secret.
+#
+# Request bodies are streamed via stdin (`--data @-`) for the same
+# reason — task content never enters argv.
+# ------------------------------------------------------------
+td_api_python() {
+  local method="$1" endpoint="$2"
+  shift 2
+  local data_mode="" request_id_value=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --data)
+        data_mode="${2:-}"
+        shift 2
+        ;;
+      --data=*)
+        data_mode="${1#--data=}"
+        shift
+        ;;
+      *)
+        printf 'Unsupported td_api option without curl: %s\n' "$1" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  if [[ "${method}" != "GET" ]]; then
+    request_id_value="$(request_id)"
+  fi
+
+  TD_METHOD="${method}" TD_ENDPOINT="${endpoint}" TD_DATA_MODE="${data_mode}" TD_REQUEST_ID="${request_id_value}" \
+    python3 -c 'import os, sys, urllib.error, urllib.request
+
+method = os.environ["TD_METHOD"]
+endpoint = os.environ["TD_ENDPOINT"]
+data_mode = os.environ.get("TD_DATA_MODE", "")
+request_id = os.environ.get("TD_REQUEST_ID", "")
+token = os.fdopen(3).read()
+
+body = None
+if data_mode:
+    if data_mode != "@-":
+        sys.stderr.write("Unsupported td_api --data mode without curl: " + data_mode + "\n")
+        sys.exit(2)
+    body = sys.stdin.buffer.read()
+
+headers = {
+    "Authorization": "Bearer " + token,
+    "Content-Type": "application/json",
+}
+if request_id:
+    headers["X-Request-Id"] = request_id
+
+req = urllib.request.Request(
+    "https://api.todoist.com/api/v1" + endpoint,
+    data=body,
+    headers=headers,
+    method=method,
+)
+
+try:
+    with urllib.request.urlopen(req, timeout=60) as response:
+        sys.stdout.buffer.write(response.read())
+except urllib.error.HTTPError as exc:
+    sys.stdout.buffer.write(exc.read())
+    sys.exit(22)
+except Exception as exc:
+    sys.stderr.write(type(exc).__name__ + ": " + str(exc) + "\n")
+    sys.exit(1)
+' 3< <(printf '%s' "${TODOIST_API_TOKEN}")
+}
+
+td_api() {
+  local method="$1" endpoint="$2"
+  shift 2
+
+  if ! command -v curl >/dev/null 2>&1; then
+    td_api_python "${method}" "${endpoint}" "$@"
+    return
+  fi
+
+  local args=(
+    --silent
+    --show-error
+    --fail-with-body
+    --request "${method}"
+    --url "https://api.todoist.com/api/v1${endpoint}"
+    --header "Content-Type: application/json"
+  )
+
+  if [[ "${method}" != "GET" ]]; then
+    args+=(--header "X-Request-Id: $(request_id)")
+  fi
+
+  curl "${args[@]}" \
+    -K <(printf 'header = "Authorization: Bearer %s"\n' "${TODOIST_API_TOKEN}") \
+    "$@"
+}
+
+# ------------------------------------------------------------
+# High-level wrapper with friendly error messages (P2 fix).
+#
+# Capture stdout and stderr into separate temp files so the JSON
+# body (from --fail-with-body) is not polluted by curl's diagnostic
+# line (e.g. "curl: (22) ..."). On failure, first try to parse the
+# JSON body for Todoist's structured error; fall back to curl stderr
+# only if the body is empty or unparseable.
+# ------------------------------------------------------------
+invoke_api() {
+  local stdout_file stderr_file response err status
+  stdout_file="$(mktemp -t td.out.XXXXXX)"
+  stderr_file="$(mktemp -t td.err.XXXXXX)"
+
+  cleanup_invoke_api() {
+    rm -f -- "${stdout_file}" "${stderr_file}"
+  }
+
+  trap 'cleanup_invoke_api; exit 130' INT
+  trap 'cleanup_invoke_api; exit 143' TERM
+  trap 'cleanup_invoke_api; exit 129' HUP
+
+  status=0
+  td_api "$@" >"${stdout_file}" 2>"${stderr_file}" || status=$?
+
+  response="$(cat "${stdout_file}")"
+  err="$(cat "${stderr_file}")"
+  cleanup_invoke_api
+  trap - INT TERM HUP
+
+  if (( status != 0 )); then
+    local msg
+    msg="$(printf '%s' "${response}" | python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+    out = data.get("error") or data.get("error_tag") or ""
+    extra = data.get("error_extra") or {}
+    if extra.get("expected"):
+        out = (out + ": " + str(extra["expected"])).strip(": ")
+    if out:
+        print(out)
+except Exception:
+    pass
+' 2>/dev/null)"
+
+    if [[ -n "${msg}" ]]; then
+      printf '✗ Todoist API: %s\n' "${msg}" >&2
+    elif [[ -n "${err}" ]]; then
+      printf '✗ %s\n' "${err}" >&2
+    else
+      printf '✗ HTTP error (exit %d)\n' "${status}" >&2
+    fi
+    return "${status}"
+  fi
+  printf '%s' "${response}"
+}
+
+build_add_payload() {
+  python3 - "$1" "${2:-}" "${3:-}" <<'PY'
+import json
+import sys
+
+content, due, prio = sys.argv[1:4]
+payload = {"content": content}
+
+if due:
+    payload["due_string"] = due
+
+if prio:
+    mapping = {
+        "p1": 4,
+        "p2": 3,
+        "p3": 2,
+        "p4": 1,
+        "1": 4,
+        "2": 3,
+        "3": 2,
+        "4": 1,
+    }
+    key = prio.lower()
+    if key not in mapping:
+        raise SystemExit("priority must be one of: p1, p2, p3, p4, 1, 2, 3, 4")
+    payload["priority"] = mapping[key]
+
+print(json.dumps(payload, ensure_ascii=False))
+PY
+}
+
+print_help() {
+  cat <<'EOF'
+td — Todoist CLI wrapper
+
+Usage:
+  td add "内容" [截止日期] [p1-p4]
+  td ls [filter]          — 默认 today
+  td done <task_id>
+  td projects
+
+Env:
+  TODOIST_API_TOKEN       — required. Takes priority over ~/.env.
+
+Examples:
+  td add "写完第三章" tomorrow p2
+  td ls "overdue | today"
+  td done 6gMFQJVHf324PHMw
+EOF
+}
+
+print_added_task() {
+  python3 -c 'import json,sys
+t=json.load(sys.stdin)
+due=t.get("due")
+due_str=due.get("string","") if due else ""
+print("✓ [{}] {}".format(t["id"], t["content"]) + (" | {}".format(due_str) if due_str else ""))'
+}
+
+print_tasks() {
+  python3 -c 'import json,sys
+data=json.load(sys.stdin)
+priority_marks={4:"!!",3:"!",2:"·",1:" "}
+for task in data.get("results", []):
+    mark=priority_marks.get(task.get("priority", 1), " ")
+    due=task.get("due", {}).get("string", "") if task.get("due") else ""
+    line="{} [{}] {}".format(mark, task["id"], task["content"])
+    if due:
+        line += " | {}".format(due)
+    print(line)
+'
+}
+
+collect_tasks() {
+  local filter="$1" cursor="" response_file
+  response_file="$(mktemp -t td.tasks.XXXXXX)"
+
+  cleanup_collect_tasks() {
+    rm -f -- "${response_file}"
+  }
+
+  trap 'cleanup_collect_tasks; exit 130' INT
+  trap 'cleanup_collect_tasks; exit 143' TERM
+  trap 'cleanup_collect_tasks; exit 129' HUP
+
+  while :; do
+    invoke_api GET "$(tasks_endpoint "${filter}" "${cursor}")" >"${response_file}"
+    print_tasks <"${response_file}"
+    cursor="$(extract_next_cursor <"${response_file}")"
+    [[ -n "${cursor}" ]] || break
+  done
+
+  cleanup_collect_tasks
+  trap - INT TERM HUP
+}
+
+print_projects() {
+  python3 -c 'import json,sys
+data=json.load(sys.stdin)
+items=data.get("results", data if isinstance(data, list) else [])
+for project in items:
+    print("[{}] {}".format(project["id"], project["name"]))'
+}
+
+load_env
+export -n TODOIST_API_TOKEN 2>/dev/null || true
+
+if [[ -z "${TODOIST_API_TOKEN:-}" ]]; then
+  echo "TODOIST_API_TOKEN is not set. Put it in ~/.env or export it before running td." >&2
+  exit 1
+fi
+
+cmd="${1:-help}"
+
+case "${cmd}" in
+  add)
+    if [[ $# -lt 2 ]]; then
+      echo 'Usage: td add "内容" [截止日期] [p1-p4]' >&2
+      exit 1
+    fi
+
+    body="$(build_add_payload "$2" "${3:-}" "${4:-}")"
+    # Stream body via stdin so task content stays out of argv.
+    response="$(printf '%s' "${body}" | invoke_api POST /tasks --data @-)"
+    printf '%s' "${response}" | print_added_task
+    ;;
+
+  ls)
+    filter="${2:-today}"
+    collect_tasks "${filter}"
+    ;;
+
+  done)
+    if [[ $# -lt 2 ]]; then
+      echo "Usage: td done <task_id>" >&2
+      exit 1
+    fi
+
+    if ! [[ "$2" =~ ^[0-9A-Za-z]+$ ]]; then
+      echo "Invalid task id: $2" >&2
+      exit 1
+    fi
+
+    invoke_api POST "/tasks/$2/close" >/dev/null
+    echo "✓ completed $2"
+    ;;
+
+  projects)
+    response="$(invoke_api GET /projects)"
+    printf '%s' "${response}" | print_projects
+    ;;
+
+  help|-h|--help)
+    print_help
+    ;;
+
+  *)
+    echo "Unknown subcommand: ${cmd}" >&2
+    print_help >&2
+    exit 1
+    ;;
+esac

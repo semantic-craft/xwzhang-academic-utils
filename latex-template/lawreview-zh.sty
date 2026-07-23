@@ -1,0 +1,185 @@
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{lawreview-zh}[2026/05/10 Chinese law review manuscript style]
+
+\RequirePackage{iftex}
+\ifXeTeX\else
+  \PackageError{lawreview-zh}{This template must be compiled with XeLaTeX}{Use the latexmk (xelatex) recipe in VS Code.}
+\fi
+
+\RequirePackage{fontspec}
+\RequirePackage{xeCJK}
+\RequirePackage{geometry}
+\RequirePackage{titlesec}
+\RequirePackage{fancyhdr}
+\RequirePackage{xcolor}
+\RequirePackage{setspace}
+\RequirePackage{etoolbox}
+\RequirePackage{booktabs}
+\RequirePackage{array}
+\RequirePackage{tabularx}
+\RequirePackage[hidelinks]{hyperref}
+
+\geometry{
+  a4paper,
+  top=25mm,
+  bottom=25mm,
+  left=28mm,
+  right=28mm,
+  headheight=13pt,
+  headsep=6mm,
+  footskip=10mm
+}
+
+\setmainfont{Times New Roman}
+\setsansfont{Arial}
+\setmonofont{Menlo}
+
+\IfFontExistsTF{Songti SC}
+  {\setCJKmainfont[AutoFakeBold=2.2]{Songti SC}}
+  {\setCJKmainfont[AutoFakeBold=2.2]{FandolSong}}
+\IfFontExistsTF{Kaiti SC}
+  {\setCJKfamilyfont{lawkai}[AutoFakeBold=2.0]{Kaiti SC}}
+  {\setCJKfamilyfont{lawkai}[AutoFakeBold=2.0]{FandolKai}}
+\IfFontExistsTF{Heiti SC}
+  {\setCJKfamilyfont{lawhei}[AutoFakeBold=2.0]{Heiti SC}}
+  {\setCJKfamilyfont{lawhei}[AutoFakeBold=2.0]{FandolHei}}
+
+\newcommand{\lawkai}{\CJKfamily{lawkai}}
+\newcommand{\lawhei}{\CJKfamily{lawhei}}
+\newcommand{\lawbodyfont}{\songti\fontsize{10.5pt}{15.75pt}\selectfont}
+\newcommand{\lawfootnotefont}{\songti\fontsize{9pt}{12pt}\selectfont}
+
+\AtBeginDocument{\lawbodyfont}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0pt}
+\linespread{1}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[C]{\songti\fontsize{9pt}{11pt}\selectfont\textcolor[HTML]{999999}{现代法学\quad 投稿模板}}
+\fancyfoot[C]{\songti\fontsize{9pt}{11pt}\selectfont 第 \thepage\ 页}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\makeatletter
+\newcommand{\@lawpapertitle}{论文题目（中文）}
+\newcommand{\@lawpaperenglishtitle}{English Title of the Article}
+\newcommand{\@lawpaperauthor}{作者姓名}
+\newcommand{\@lawpaperinstitution}{工作单位：　　　　　大学　　　　　学院（省/市，邮编）}
+\newcommand{\@lawpapertitlefield}{论文题目：}
+\newcommand{\@lawpapertitleauthorfield}{作者姓名：}
+\newcommand{\@lawpaperrank}{职　　称：}
+\newcommand{\@lawpaperdegree}{学　　位：}
+\newcommand{\@lawpaperaddress}{通信地址：}
+\newcommand{\@lawpaperphone}{联系电话：}
+\newcommand{\@lawpaperemail}{电子邮箱：}
+\newcommand{\@lawpaperfund}{基金项目：　　　　　（项目编号：　　　　　）}
+
+\newcommand{\lawpapertitle}[1]{\gdef\@lawpapertitle{#1}\gdef\@lawpapertitlefield{论文题目：#1}}
+\newcommand{\lawpaperenglishtitle}[1]{\gdef\@lawpaperenglishtitle{#1}}
+\newcommand{\lawpaperauthor}[1]{\gdef\@lawpaperauthor{#1}\gdef\@lawpapertitleauthorfield{作者姓名：#1}}
+\newcommand{\lawpaperinstitution}[1]{\gdef\@lawpaperinstitution{工作单位：#1}}
+\newcommand{\lawpaperrank}[1]{\gdef\@lawpaperrank{职　　称：#1}}
+\newcommand{\lawpaperdegree}[1]{\gdef\@lawpaperdegree{学　　位：#1}}
+\newcommand{\lawpaperaddress}[1]{\gdef\@lawpaperaddress{通信地址：#1}}
+\newcommand{\lawpaperphone}[1]{\gdef\@lawpaperphone{联系电话：#1}}
+\newcommand{\lawpaperemail}[1]{\gdef\@lawpaperemail{电子邮箱：#1}}
+\newcommand{\lawpaperfund}[1]{\gdef\@lawpaperfund{基金项目：#1}}
+
+\newcommand{\makeauthorinfopage}{%
+  \thispagestyle{fancy}
+  \begin{center}
+    {\lawhei\bfseries\fontsize{14pt}{20pt}\selectfont\textcolor[HTML]{CC0000}{【作者信息页 — 请勿与正文合并】}}
+  \end{center}
+  \vspace{12pt}
+  {\lawbodyfont
+  \noindent\@lawpapertitlefield\par
+  \noindent\@lawpapertitleauthorfield\par
+  \noindent\@lawpaperinstitution\par
+  \noindent\@lawpaperrank\par
+  \noindent\@lawpaperdegree\par
+  \noindent\@lawpaperaddress\par
+  \noindent\@lawpaperphone\par
+  \noindent\@lawpaperemail\par
+  \noindent\@lawpaperfund\par}
+  \clearpage
+}
+
+\newcommand{\makepapertitle}{%
+  \begin{center}
+    {\lawhei\bfseries\fontsize{18pt}{27pt}\selectfont \@lawpapertitle\par}
+    \vspace{12pt}
+    {\bfseries\fontsize{14pt}{21pt}\selectfont \@lawpaperenglishtitle\par}
+  \end{center}
+  \vspace{8pt}
+}
+\makeatother
+
+\titleformat{\section}
+  {\lawhei\bfseries\fontsize{14pt}{21pt}\selectfont}
+  {\chinese{section}、}{0pt}{}
+\titlespacing*{\section}{0pt}{8pt}{4pt}
+
+\titleformat{\subsection}
+  {\lawhei\bfseries\fontsize{12pt}{18pt}\selectfont}
+  {（\chinese{subsection}）}{0pt}{}
+\titlespacing*{\subsection}{0pt}{6pt}{3pt}
+
+\titleformat{\subsubsection}
+  {\songti\fontsize{10.5pt}{15.75pt}\selectfont}
+  {\arabic{subsubsection}.}{0.5em}{}
+\titlespacing*{\subsubsection}{0pt}{4pt}{2pt}
+
+\setcounter{secnumdepth}{3}
+
+\newcommand{\zhabstract}[1]{%
+  {\lawkai\bfseries\fontsize{12pt}{18pt}\selectfont 摘\quad 要\par}
+  \vspace{2pt}
+  {\lawkai\fontsize{10.5pt}{15pt}\selectfont\noindent\hspace{2em}#1\par}
+  \vspace{6pt}
+}
+
+\newcommand{\zhkeywords}[1]{%
+  {\lawkai\bfseries\fontsize{12pt}{18pt}\selectfont 关键词\par}
+  \vspace{2pt}
+  {\lawkai\fontsize{10.5pt}{15pt}\selectfont\noindent\hspace{2em}#1\par}
+  \vspace{8pt}
+}
+
+\newcommand{\enabstract}[1]{%
+  {\bfseries\fontsize{12pt}{18pt}\selectfont Abstract\par}
+  \vspace{2pt}
+  {\itshape\fontsize{10.5pt}{15pt}\selectfont\noindent #1\par}
+  \vspace{6pt}
+}
+
+\newcommand{\enkeywords}[1]{%
+  {\fontsize{10.5pt}{15pt}\selectfont\noindent\textbf{Keywords:} \textit{#1}\par}
+  \vspace{10pt}
+}
+
+\makeatletter
+\renewcommand{\thefootnote}{〔\arabic{footnote}〕}
+\renewcommand{\@makefnmark}{\hbox{\textsuperscript{\normalfont\thefootnote}}}
+\renewcommand{\@makefntext}[1]{%
+  \lawfootnotefont
+  \noindent\makebox[2.8em][l]{\normalfont\thefootnote}#1%
+}
+\makeatother
+\setlength{\footnotesep}{6pt}
+\setlength{\skip\footins}{10pt}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcommand{\lawtablecaption}[1]{%
+  \begin{center}
+    {\songti\fontsize{10.5pt}{12pt}\selectfont #1}
+  \end{center}
+  \vspace{-4pt}
+}
+
+\hypersetup{
+  pdftitle={Chinese Law Review Manuscript},
+  pdfauthor={},
+  pdfsubject={Legal academic article},
+  pdfcreator={XeLaTeX with LaTeX Workshop}
+}
