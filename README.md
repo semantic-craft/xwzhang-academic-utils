@@ -1,6 +1,6 @@
 # xwzhang-academic-utils
 
-私有学术工具集（monorepo）。
+自制学术工具集（monorepo）。
 
 ## 子项目
 
