@@ -11,7 +11,7 @@ dependencies = [
     "click>=8.0",
     "lxml>=5.0",
     "pymupdf>=1.23",
-    "pypdf>=4.0",
+    "pypdf>=6.14.2",
     "pyzotero>=1.5",
     "requests>=2.28",
 ]
