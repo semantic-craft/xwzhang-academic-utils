@@ -9,7 +9,7 @@ authors = [{ name = "Oliver Steele", email = "steele@osteele.com" }]
 dependencies = [
     "beautifulsoup4>=4.12",
     "click>=8.0",
-    "lxml>=5.0",
+    "lxml>=6.1.0",
     "pymupdf>=1.23",
     "pypdf>=4.0",
     "pyzotero>=1.5",
