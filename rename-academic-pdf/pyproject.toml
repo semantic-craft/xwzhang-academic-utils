@@ -3,7 +3,7 @@ name = "rename-academic-pdf"
 version = "0.1.0"
 description = "Rename academic PDF files to bibliography format (Author - Title Year)"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Oliver Steele", email = "steele@osteele.com" }]
 dependencies = [
