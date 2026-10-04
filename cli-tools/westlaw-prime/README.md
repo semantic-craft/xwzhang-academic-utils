@@ -1,0 +1,13 @@
+# Westlaw context preparation
+
+This retained entrypoint now invokes `scholar westlaw session-prepare` through the public CLI. Set `SCHOLAR_BINARY` to the verified Scholar executable. Supply `--browser-profile`, `--session` and `--tab-id` explicitly for a caller-owned, already navigated Westlaw tab. The caller serializes access to that tab; the wrapper neither acquires a global workspace nor closes the caller's resources.
+
+Default invocation only inspects the page. It does not log in, navigate, choose a Client ID, restore a session, perform a search or access chargeable content. `WESTLAW_CLIENT_ID`, `OPENCLI_HOME`, and the old lock variables are no longer consumed. Existing exit-code expectations change to Scholar's structured JSON contract (0 for a completed inspection, 2 for arguments, 1 for runtime failures); read `items[0].state` rather than treating exit 0 as preparation complete.
+
+Westlaw Client IDs record the client for whom research is performed, not a local computer/session identity. See [official Westlaw Edge guidance](https://www.thomsonreuters.com/en-us/help/westlaw-edge/setup/client-id). Do not infer an ID, billing attribution, or account entitlement from a desktop name. Only an explicitly authorized user-selected target may be applied.
+
+For selection, additionally pass `--apply --client-id-file /private/client.txt --active-client-selector '#inspectedActiveControl' --operation /private/context-operation.json`. The target file must contain one private text value; use a filename without the Client ID. The selector must come from inspection of that exact current page. Selection only matches one visible enabled Recent Client ID exactly. It does not fill or submit a new identity, dismiss Restore, or accept chargeable access.
+
+Keep the same operation file on retry: it binds the exact profile/session/tab, target digest and selector. A previous attempt is read back and never clicked again, even if unconfirmed. Operation files are private and atomically published before dispatch; no automatic stale deletion. Different operation files are separate explicit operations and do not provide cross-operation deduplication. The caller must not overlap operations on one borrowed tab. Confirmation requires the inspected active identity to match and the Client ID dialog to disappear. If the site needs another confirmation step or changes its DOM, stop for review instead of guessing.
+
+Validation: `bash cli-tools/westlaw-prime/westlaw-prime.test.sh`, plus the selected research-infra checkout's Scholar test suite and `westlaw-session.test.js`. All fixture values are synthetic. Real Client ID/billing attribution, private research and production activation remain separately authorized actions.

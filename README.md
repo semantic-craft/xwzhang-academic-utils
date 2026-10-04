@@ -11,3 +11,5 @@
 
 两个子项目通过 `git subtree add` 引入，原仓库 commit history 已保留在各自子目录路径下。
 
+
+- [`cli-tools/westlaw-prime/`](./cli-tools/westlaw-prime/README.md) — retained Westlaw context entrypoint; the candidate uses Scholar's public CLI, explicit browser context and read-only defaults. See its authorization and recovery contract before selecting a Client ID.
