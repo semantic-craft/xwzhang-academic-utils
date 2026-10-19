@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+# PDF subproject tests (AGENTS.md: `uv run pytest`), frozen and offline so nothing is resolved or downloaded.
+# `just check` formats files, so it is not used here; LaTeX changes still need a real compile.
+(cd rename-academic-pdf && uv run --frozen --offline pytest)
